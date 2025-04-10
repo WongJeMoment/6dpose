@@ -178,7 +178,8 @@ class ConvBlock(nn.Module):
     def forward(self, x):
         return self.model(x)
 
-
+# 用于构建可插拔的神经网络层
+# 通用的“卷积模块积木”，方便快速搭建神经网络，同时支持 2D/3D、普通/反卷积、是否归一化、是否激活
 class BasicConv_IN(nn.Module):
     def __init__(self, in_channels, out_channels, deconv=False, is_3d=False, IN=True, relu=True, **kwargs):
         super(BasicConv_IN, self).__init__()
@@ -334,24 +335,35 @@ def groupwise_correlation(fea1, fea2, num_groups):
     cost = (fea1 * fea2).view([B, num_groups, channels_per_group, H, W]).mean(dim=2).mean(-1).mean(-1)
     return cost
 
-
+# refimg_fea: 参考图像的特征（通常是左图）。
+# targetimg_fea: 目标图像的特征（通常是右图）。
+# maxdisp: 最大视差范围（原始分辨率下）。
+# num_groups: 分组数量，用于分组相关性计算。
+# patch_pos: 当前参考图的 patch 中心位置坐标。
+# ds_rate: 特征图的下采样率。
 def build_gwc_volume(refimg_fea, targetimg_fea, maxdisp, num_groups, patch_pos, ds_rate):
     BN, C, P, _ = refimg_fea.shape    # 24 * C * 31 * 31
     B, _, H, W = targetimg_fea.shape  # 4 * C * 31 * 31
-    maxdisp_ds = maxdisp // ds_rate
+    maxdisp_ds = maxdisp // ds_rate   # 下采样后的最大视差
 
+    # 空代价体，准备每个视差位置填上相似度。
     volume = refimg_fea.new_zeros([BN, num_groups, maxdisp_ds])  # 24 * 8 * 160//4
-    dist_to_boarder = patch_pos[:, 0].max()   # (24, 2)
-
-    off = torch.zeros_like(patch_pos)
+    # 距离边界检查 + 初始化
+    dist_to_boarder = patch_pos[:, 0].max()   # patch 最左边距离图像边界的最大值
+    off = torch.zeros_like(patch_pos)         # 每次视差迭代都会左移，off 记录累计偏移
+    # target_copy是把右图特征扩展成与refimg_fea一样数量的tensor，用于提取相应位置的patch
     target_copy = targetimg_fea.unsqueeze(1).repeat(1, BN // B, 1, 1, 1).reshape(-1, C, H, W)
-
+    # 遍历视差，构建cost volume
     for i in range(maxdisp_ds):
+        # 如果当前视差已经让 patch 移出图像边界，那就不用继续了。
         if i > dist_to_boarder:
             break
         if i > 0:
+            # 横向往左移动（因为 stereo 匹配假设视差是水平方向的）；
             off[:, 0] -= 1. * ds_rate
+            # 从右图上抽取与左图 patch 对齐的区域（用 patch_pos + 偏移）；
             target_patch = extract_glimpse(target_copy, (P, P), patch_pos + off + 0.5)
+            # 左右特征之间按组点乘计算相似度，填入当前视差层。
             volume[:, :, i] = groupwise_correlation(refimg_fea, target_patch, num_groups)
         else:
             target_patch = extract_glimpse(target_copy, (P, P), patch_pos + off + 0.5)

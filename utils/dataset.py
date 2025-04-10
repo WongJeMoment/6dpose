@@ -178,18 +178,23 @@ class RecurrentStereoSubseq(Dataset):
 
 def getDataset(data_folder='/data/lisiqi/event_3d_raw/', train=True):
     dataset_list = []
-
+    # 读取文件列表（train/test）
     if train:
         with open(os.path.join(data_folder, 'train.txt'), 'r') as f:
             lines = f.readlines()
     else:
         with open(os.path.join(data_folder, 'test.txt'), 'r') as f:
             lines = f.readlines()
-
+    # 逐个加载子数据集
     for l in lines:
+        # 解析文件名和序列号
         f1, seq_num = os.path.split(l.strip('\n'))
+        # 获取序列号
         root, subdir = os.path.split(f1)
+        # 拼接数据集路径
         subdataset = RecurrentStereoSubseq(root_dir=data_folder, sequence_name=f'{subdir}/{seq_num}')
+        # 添加到数据集列表
         dataset_list.append(subdataset)
         print(f"Loading...\tseq_name: {subdir}\tseq_idx: {seq_num}\tnum_feat:{subdataset.n_feat}")
+    # 返回数据集列表
     return dataset_list

@@ -196,17 +196,19 @@ class JointEncoder(nn.Module):
         x = self.output_layers(x)
         return x, x1
 
-
+# 立体匹配（Stereo Matching）任务，
+# 目标是从左右图像的特征中估计视差图（disparity map）。
+# 即：一个像素在左图和右图之间的水平偏移量，用于深度估计。
 class PatchMixStereo(nn.Module):
     def __init__(self, max_disp=160, ds_rate=1, group=8, recurr=False, hgnn=True, bs=None, num_fea=None):
         super().__init__()
-        self.max_disp = max_disp
-        self.group = group
+        self.max_disp = max_disp    #  最大视差范围。
+        self.group = group          # GWC 卷积的分组数。
         self.k = 3
         self.th = 16
 
-        self.recurr = recurr
-        self.hgnn = hgnn
+        self.recurr = recurr        # 是否启用循环
+        self.hgnn = hgnn            # 图神经网络。
         if bs is not None:
             self.pos = torch.repeat_interleave(torch.repeat_interleave(torch.arange(0, max_disp//ds_rate)[None, :, None], bs, dim=0), self.k, dim=2).cuda()
         if recurr:
@@ -219,7 +221,7 @@ class PatchMixStereo(nn.Module):
             self.HGNNP = HGNNPN(self.group, self.group)
 
         self.ds_rate = ds_rate
-
+    # 状态重置一下，防止上次的情绪污染这次判断。
     def reset(self):
         if self.recurr:
             self.gru.reset()
@@ -232,17 +234,24 @@ class PatchMixStereo(nn.Module):
         mask = (cost_volume_1.sum(dim=1, keepdim=True) == 0)
 
         if self.hgnn:
+            # 特征准备 & KNN 找邻居
+            # 视差点从“特征上最像的”点中选 k 个邻居，建图用。
             feature = cost_volume_1.transpose(1, 2).contiguous()
+            # 两两节点之间的距离矩阵,找出最小的 k 个值，也就是“最近的 k 个邻居”
             _, row_idx_k = torch.topk(square_distance(feature, feature), self.k, dim=2, sorted=False, largest=False)
 
+            # 定位点的位置索引
             if hasattr(self, 'pos'):
                 position = self.pos
             else:
+                # 构造每个点的下标位置：形状为 [B, N, k]
                 position = torch.repeat_interleave(torch.repeat_interleave(torch.arange(0, row_idx_k.shape[1])[None, :, None], row_idx_k.shape[0], dim=0), row_idx_k.shape[2], dim=2).cuda()
 
+            # 位置索引的形状检查
             if position.shape[0] != row_idx_k.shape[0]:
                 position = torch.repeat_interleave(torch.repeat_interleave(torch.arange(0, row_idx_k.shape[1])[None, :, None], row_idx_k.shape[0], dim=0), row_idx_k.shape[2], dim=2).cuda()
 
+            # 位置筛选
             space_dist = torch.abs(row_idx_k - position)
             mask_pos = space_dist < self.th
             neg_idx = row_idx_k.clone()
@@ -257,8 +266,10 @@ class PatchMixStereo(nn.Module):
             hg_neg[batch_idx_k, neg_idx, col_idx_k] = 1
             hg_pos = hg_pos[:, :-1, :]
             hg_neg = hg_neg[:, :-1, :]
+            # 安全检查
             if hg_neg.sum() + hg_pos.sum() != row_idx_k.shape[0]*row_idx_k.shape[1]*row_idx_k.shape[2]:
                 print('Warning')
+            # 图神经网络传消息
             cost_volume_1 = self.HGNNP(feature, hg_pos, hg_neg).transpose(1, 2)
 
 
@@ -273,29 +284,48 @@ class PatchMixStereo(nn.Module):
 
 
 class TrackerNetEval(nn.Module):
+    # 初始化函数
     def __init__(self, feature_dim=1024, patch_size=31, input_channels=None, channels_in_per_patch=10, hgnn=False, bs=None):
         super(TrackerNetEval, self).__init__()
 
         self.feature_dim = feature_dim
         self.redir_dim = 128
-
+        # reference_encoder 和 target_encoder：分别是参考帧和目标帧的特征编码器。
         self.reference_encoder = FPNEncoder1(1, feature_dim)
         self.target_encoder = FPNEncoder(channels_in_per_patch, feature_dim)
-
+        # reference_redir 和 target_redir：分别是参考帧和目标帧的重定向卷积层。
         self.reference_redir = nn.Conv2d(feature_dim, self.redir_dim, kernel_size=3, padding=1)
         self.target_redir = nn.Conv2d(feature_dim, self.redir_dim, kernel_size=3, padding=1)
+        # softmax：用于将特征图转换为概率分布。
         self.softmax = nn.Softmax(dim=2)
+        # joint_encoder：联合编码器，用于将参考帧和目标帧的特征进行融合。
         self.joint_encoder = JointEncoder(in_channels=1 + 2 * self.redir_dim)
-
+        # fc_out：全连接层，用于输出最终的预测结果。
         self.predictor = nn.Linear(in_features=512, out_features=2, bias=False)
         self.flatten = nn.Flatten()
         self.patch_size = patch_size
+        # learn：用于学习最终的预测结果。
         self.learn = nn.Sequential(nn.Linear(256, 128), nn.LeakyReLU(0.1), nn.Linear(128, 5))
 
         self.f_ref, self.d_ref = None, None
-
-        self.conv_bottom_0 = ConvBlock(in_channels=channels_in_per_patch, out_channels=32, n_convs=2, kernel_size=1, padding=0, downsample=False)
-        self.stem_stereo = nn.Sequential(BasicConv_IN(32, 48, kernel_size=3, stride=1, padding=1), nn.Conv2d(48, 48, 3, 1, 1, bias=False), nn.InstanceNorm2d(48), nn.ReLU())
+        # conv_bottom_0：用于对输入的特征图进行卷积处理。
+        self.conv_bottom_0 = ConvBlock(
+            in_channels=channels_in_per_patch,  # 输入通道数
+            out_channels=32,  # 输出通道数（输出特征图数量）
+            n_convs=2,  # 卷积层的数量（有两个连续卷积）
+            kernel_size=1,  # 卷积核大小为 1x1（即 pointwise 卷积）
+            padding=0,  # 不填充边缘，保持尺寸不变（因为kernel是1x1也无所谓）
+            downsample=False  # 不做下采样（即步长 stride 是 1）
+        )
+        # stem_stereo：用于对输入的特征图进行卷积处理。
+        # 相当于一个输入预处理层，把一个 32 通道的输入处理成更有“辨识度”的 48 通道特征图。
+        self.stem_stereo = nn.Sequential(
+            BasicConv_IN(32, 48, kernel_size=3, stride=1, padding=1),  # 一个卷积模块，把输入的通道数从 32 变成 48。
+            nn.Conv2d(48, 48, 3, 1, 1, bias=False),  # 又来一层 3×3 的卷积，输入输出通道都为 48，不改变尺寸。
+            nn.InstanceNorm2d(48),  # 给上面这层卷积结果做 Instance Normalization。
+            nn.ReLU()  # 激活函数，增加非线性能力
+        )
+        # stereo_matching：用于进行立体匹配的网络。
         self.stereo_matching = PatchMixStereo(max_disp=160, ds_rate=4, recurr=False, group=8, hgnn=hgnn, bs=bs, num_fea=48)
 
     def init_weights(self):
@@ -306,20 +336,28 @@ class TrackerNetEval(nn.Module):
         self.joint_encoder.reset()
 
     def forward(self, ev_frame_left, ev_frame_right, ref, pos, pos_r, pred=None):
+        # 将所有子网络设置为评估模式（不会进行参数更新）
         self.reference_encoder = self.reference_encoder.eval()
         self.target_encoder = self.target_encoder.eval()
         self.reference_redir = self.reference_redir.eval()
         self.target_redir = self.target_redir.eval()
         self.joint_encoder = self.joint_encoder.eval()
         self.predictor = self.predictor.eval()
-
+        # 将输入数据移到GPU上
+        # 把 ref 的前两个维度 B, N 合并成一个维度。--后续的神经网络大多数都是处理形状为 (Batch, C, H, W) 的图像数据。
         ref = ref.reshape(-1, ref.shape[2], ref.shape[3], ref.shape[4])
+        # 输入关键点的姿态信息
         u_centers_l = pos
         # u_centers_r = pos_r
+        # 输出u_centers_l 的维度信息。
+        # 其中 b 是 batch_size，n 是关键点的数量，_ 是关键点的维度（x, y）。
         b, n, _ = u_centers_l.shape
+        # 让每个关键点作为独立单位处理，把 (B, N, 2) reshape 成 (B*N, 2)。
         u_centers_l = u_centers_l.reshape(-1, 2)
         # u_centers_r = u_centers_r.reshape(-1, 2)
+        # 原始输入：事件图像
         _, c, h, w = ev_frame_left.shape
+        # 复制事件图像
         ev_frame_left = ev_frame_left.unsqueeze(1).repeat(1, n, 1, 1, 1)
         ev_frame_left = ev_frame_left.reshape(-1, c, h, w)
         # ev_frame_right_copy = ev_frame_right.unsqueeze(1).repeat(1, n, 1, 1, 1)
@@ -327,43 +365,57 @@ class TrackerNetEval(nn.Module):
 
         patch_size = self.patch_size
 
+        # 如果没有传入 pred，就说明没有需要变换，那就用原图 ref 当作 ref1
         if pred is None:
             ref1 = ref
+        # 否则，执行仿射变换
         else:
             [scale, angle, sx, sy] = pred
+            # 构建仿射矩阵
             a = kornia.geometry.transform.get_affine_matrix2d(torch.zeros_like(scale), torch.zeros_like(scale), 1.0/scale, angle, sx=sx, sy=sy)
+            # 创建采样网格，根据仿射矩阵 a 创建一个坐标网格，用来在 ref 上采样。
             grid = F.affine_grid(a[:, :2, :], size=ref.shape)
+            # 根据 grid 里的坐标，从原图 ref 上采样生成变换后的图 ref1
             ref1 = F.grid_sample(ref, grid)
 
+        # 提取关键点附近的图像 Patch
         x = extract_glimpse(ev_frame_left, (patch_size, patch_size), u_centers_l + 0.5)
         # x_r = extract_glimpse(ev_frame_right_copy, (patch_size, patch_size), u_centers_r + 0.5)   # (bs*N_fea), C, H, W
-
+        # 编码提取特征
         f0, _ = self.target_encoder(x)
         # f0_r, _ = self.target_encoder(x_r)
 
+        # 参考帧的特征编码
         self.f_ref, self.d_ref = self.reference_encoder(ref, ref1)
         self.f_ref = self.reference_redir(self.f_ref)
 
+        # 做特征对比（相似性计算）
+        # 类似于特征对齐或注意力匹配，结果是相关性得分图
         f_corr = (f0 * self.d_ref).sum(dim=1, keepdim=True)
         # f_corr_r = (f0_r * self.d_ref.detach()).sum(dim=1, keepdim=True)
-
+        # 归一化处理
         f_corr = self.softmax(f_corr.view(-1, 1, self.patch_size * self.patch_size)).view(-1, 1, self.patch_size, self.patch_size)
         # f_corr_r = self.softmax(f_corr_r.view(-1, 1, self.patch_size * self.patch_size)).view(-1, 1, self.patch_size, self.patch_size)
-
+        # 参考帧的特征编码
         tf = self.target_redir(f0)
         # tf_r = self.target_redir(f0_r)
 
         f = torch.cat([f_corr, tf, self.f_ref], dim=1)
         # f_r = torch.cat([f_corr_r, tf_r, self.f_ref], dim=1)
         # cat_f = torch.cat([f, f_r], dim=0)
-
+        # 联合编码器处理
         f, f1 = self.joint_encoder(f)
 
+        # 预测关键点偏移量
         f = self.predictor(f)
         f_left = f[:b*n].reshape(b, n, 2)
         # f_right = f[b*n:].reshape(b, n, 2)
 
-
+        # 预测仿射变换参数
+        # 从 f1 中预测仿射参数（总共 5 个）：
+        # scale: 预测值加 0.5，保证缩放不为 0
+        # angle: 映射到 [-7.5°, +7.5°] 范围
+        # sx, sy: 平移量在 [-0.5, 0.5] 区间
         f1 = f1[:b*n]
         pred = F.sigmoid(self.learn(f1))
         scale = pred[:, :2] + 0.5
@@ -371,11 +423,16 @@ class TrackerNetEval(nn.Module):
         sx = pred[:,3] - 0.5
         sy = pred[:,4] - 0.5
 
+        # 初始视差估计（立体匹配）
         f0_st = self.stem_stereo(self.conv_bottom_0(x))
         f0_r_sframe = self.stem_stereo(self.conv_bottom_0(ev_frame_right))
 
         init_disp = self.stereo_matching(f0_st, f0_r_sframe, u_centers_l)
 
+        # 将预测的视差和关键点位置进行更新
+        # f_left	(B, N, 2)	每个关键点在左图中预测的位置
+        # init_disp	(B, N, 1)	每个关键点在左图中的视差
+        # [scale, angle, sx, sy]	(B*N, )	仿射变换参数（可以作用到参考图）
         return f_left, init_disp.reshape(b, -1), [scale, angle, sx, sy]
 
 
