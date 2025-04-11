@@ -139,7 +139,7 @@ if __name__ == '__main__':
             model.reset()
             opFolder = os.path.join('./output', td.sequence_name)
             os.makedirs(opFolder, exist_ok=True)
-
+            # 逐帧处理
             for i, (ts, data, gt) in enumerate(DL):
                 for k, v in data.items():
                     data[k] = v.cuda()
@@ -161,8 +161,9 @@ if __name__ == '__main__':
                     flow_l_pred, disp_pred, pred = model(
                         ev_frame_l, ev_frame_r, ref_patch, current_pos_l, None, pred=pred
                     )
-
+                    # 特征追踪(光流法)
                     current_pos_l += flow_l_pred.detach()
+                    # 3D重建
                     pos = td.reprojectImageTo3D_ph(disp_pred[0].cpu(), current_pos_l[0].cpu())
 
                     disp.append(disp_pred)
@@ -213,6 +214,7 @@ if __name__ == '__main__':
                             x_observed = curr_2d_valid
 
                             try:
+                                # 最小二乘姿态估计
                                 rvec, tvec, cost, success = estimate_pose_least_squares(X_template, x_observed, K,
                                                                                         rvec_init=rvec.flatten() if rvec is not None else None,
                                                                                         tvec_init=tvec.flatten() if tvec is not None else None)
