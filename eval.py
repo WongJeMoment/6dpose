@@ -8,6 +8,74 @@ from torch.utils.data import DataLoader
 import numpy as np
 import torch
 import cv2
+import threading
+import time
+sys.path.append("/usr/lib/python3/dist-packages/")
+
+from metavision_core.event_io import EventsIterator
+from metavision_core.event_io.raw_reader import initiate_device
+from metavision_sdk_core import PeriodicFrameGenerationAlgorithm, ColorPalette
+from metavision_sdk_ui import EventLoop, BaseWindow, MTWindow, UIKeyEvent
+
+def setup_camera(serial, cam_mode):
+    # 打印相机信息
+    print(f"\n🚀 Starting camera {serial} in mode: {cam_mode.upper()}")
+    # 连接设备
+    try:
+        device = initiate_device(path=serial)
+    except Exception as e:
+        print(f"❌ Could not initiate device {serial}: {e}")
+        return
+    # 打印设备信息
+    try:
+        print(f"✅ Connected to device with serial: {device.get_serial()}")
+    except:
+        print("⚠️  Warning: Unable to get serial number.")
+
+    sync_iface = device.get_i_camera_synchronization()
+    if not sync_iface:
+        print("❌ Device does not support synchronization interface.")
+        return
+    # 设置为 master / slave 模式
+    try:
+        if cam_mode == "master":
+            sync_iface.set_mode_master()
+            print("✅ Set to MASTER mode.")
+        else:
+            sync_iface.set_mode_slave()
+            print("✅ Set to SLAVE mode.")
+    except Exception as e:
+        print(f"❌ Failed to set {cam_mode} mode: {e}")
+        return
+
+    # 创建显示窗口，显示事件图像
+    mv_iterator = EventsIterator.from_device(device=device)
+    height, width = mv_iterator.get_size()
+    title = f"Metavision - {cam_mode.upper()} ({serial})"
+    # 从设备读取事件流。
+    with MTWindow(title=title, width=width, height=height,
+                  mode=BaseWindow.RenderMode.BGR) as window:
+        # 设置键盘回调函数
+        def keyboard_cb(key, scancode, action, mods):
+            if key in [UIKeyEvent.KEY_ESCAPE, UIKeyEvent.KEY_Q]:
+                window.set_close_flag()
+        window.set_keyboard_callback(keyboard_cb)
+        # 创建事件帧生成器
+        frame_gen = PeriodicFrameGenerationAlgorithm(width, height, fps=300, palette=ColorPalette.CoolWarm)
+        # 设置帧输出回调函数
+        def on_frame_cb(ts, frame):
+            window.show_async(frame)
+
+        frame_gen.set_output_callback(on_frame_cb)
+
+        # 事件处理主循环
+        for evs in mv_iterator:
+            EventLoop.poll_and_dispatch()
+            # 把当前时间段的事件丢进 frame_gen 聚合成帧。
+            frame_gen.process_events(evs)
+            if window.should_close():
+                break
+
 
 def draw_tracking(img, points, color=(0, 255, 0)):
     """ 在图像上画出点轨迹 """
@@ -25,7 +93,6 @@ if __name__ == '__main__':
     model_info = torch.load(ckpt_path)
     model.load_state_dict(model_info["state_dict"])
     model = model.cuda()
-    print(f"Loaded from: {ckpt_path}")
     # 加载测试数据集
     testDataset = getDataset(data_folder=data_folder, train=False)
 
@@ -65,6 +132,9 @@ if __name__ == '__main__':
                 disp = []                           # 保存视差
                 pos_3d = []                         # 保存3D位置
                 tracked_2d = []                     # 保存轨迹
+                threads = []
+
+
 
                 # 逐帧处理
                 for unroll in range(data['ev_frame_left'].shape[1]):
@@ -75,7 +145,6 @@ if __name__ == '__main__':
                     flow_l_pred, disp_pred, pred = model(
                         ev_frame_l, ev_frame_r, ref_patch, current_pos_l, None, pred=pred
                     )
-
                     current_pos_l += flow_l_pred.detach()           # 更新当前跟踪点
                     pos = td.reprojectImageTo3D_ph(disp_pred[0].cpu(), current_pos_l[0].cpu())  # 3D位置
                     # 计算当前跟踪点的3D位置
