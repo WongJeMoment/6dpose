@@ -134,8 +134,6 @@ if __name__ == '__main__':
                 tracked_2d = []                     # 保存轨迹
                 threads = []
 
-#
-
                 # 逐帧处理
                 for unroll in range(data['ev_frame_left'].shape[1]):
                     # 读取当前帧的事件数据
