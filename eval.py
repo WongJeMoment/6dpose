@@ -134,11 +134,26 @@ if __name__ == '__main__':
                 tracked_2d = []                     # 保存轨迹
                 threads = []
 
-                # 逐帧处理
+                # 配置事件相机
+                lc = threading.Thread(target=setup_camera, args=("00051195", "slave"))
+                lc.start()
+                threads.append(lc)
+                time.sleep(1)  # 小延迟以防初始化冲突
+                rc = threading.Thread(target=setup_camera, args=("00051197", "master"))
+                rc.start()
+                threads.append(rc)
+
                 for unroll in range(data['ev_frame_left'].shape[1]):
                     # 读取当前帧的事件数据
-                    ev_frame_l = data['ev_frame_left'][:, unroll]   # 左事件相机
-                    ev_frame_r = data['ev_frame_right'][:, unroll]  # 右事件相机
+                    ev_frame_l = threading.Thread(target=setup_camera, args=("00051195", "slave"))
+                    ev_frame_l.start()
+                    threads.append(ev_frame_l)
+                    time.sleep(1)  # 小延迟以防初始化冲突
+                    ev_frame_r  = threading.Thread(target=setup_camera, args=("00051197", "master"))
+                    ev_frame_r.start()
+                    threads.append(ev_frame_r)
+                    # ev_frame_l = data['ev_frame_left'][:, unroll]   # 左事件相机
+                    # ev_frame_r = data['ev_frame_right'][:, unroll]  # 右事件相机
                     # 读取当前帧的 GT 数据
                     flow_l_pred, disp_pred, pred = model(
                         ev_frame_l, ev_frame_r, ref_patch, current_pos_l, None, pred=pred
@@ -175,6 +190,48 @@ if __name__ == '__main__':
                     key = cv2.waitKey(30)
                     if key == 27:  # ESC 退出
                         break
+
+                # 逐帧处理
+                # for unroll in range(data['ev_frame_left'].shape[1]):
+                #     # 读取当前帧的事件数据
+                #     ev_frame_l = data['ev_frame_left'][:, unroll]   # 左事件相机
+                #     ev_frame_r = data['ev_frame_right'][:, unroll]  # 右事件相机
+                #     # 读取当前帧的 GT 数据
+                #     flow_l_pred, disp_pred, pred = model(
+                #         ev_frame_l, ev_frame_r, ref_patch, current_pos_l, None, pred=pred
+                #     )
+                #     current_pos_l += flow_l_pred.detach()           # 更新当前跟踪点
+                #     pos = td.reprojectImageTo3D_ph(disp_pred[0].cpu(), current_pos_l[0].cpu())  # 3D位置
+                #     # 计算当前跟踪点的3D位置
+                #     disp.append(disp_pred)
+                #     # 计算当前跟踪点的视差
+                #     pos_l.append(current_pos_l.clone())
+                #     # 保存当前跟踪点的2D位置
+                #     pos_3d.append(pos)
+                #
+                #     # ✅ 用事件帧可视化（多通道取平均）
+                #     ev_img = ev_frame_l[0].detach().cpu()  # shape: [10, H, W]
+                #     # 将事件帧转换为图像
+                #     if ev_img.ndim == 3 and ev_img.shape[0] == 10:
+                #         ev_img_vis = ev_img.mean(dim=0).numpy() * 255           # shape: [H, W]
+                #         img = np.stack([ev_img_vis]*3, axis=-1).astype(np.uint8)# shape: [H, W, 3]
+                #     else:
+                #         raise ValueError(f"Unsupported ev_frame_l shape: {ev_img.shape}")
+                #     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)                 # OpenCV BGR格式
+                #
+                #     # ✅ 绘制轨迹
+                #     tracked_2d.append(current_pos_l[0].cpu().numpy())
+                #     # 绘制当前跟踪点
+                #     for p in tracked_2d:
+                #         # 绘制轨迹
+                #         img = draw_tracking(img, p)
+                #     # 绘制当前跟踪点
+                #     img = draw_tracking(img, current_pos_l[0].cpu().numpy(), color=(0, 0, 255))
+                #     # 绘制参考图像
+                #     cv2.imshow(window_name, img)
+                #     key = cv2.waitKey(30)
+                #     if key == 27:  # ESC 退出
+                #         break
 
                 pos_3d = torch.stack(pos_3d)
                 np.save(os.path.join(opFolder, 'pos_3d_pred.npy'), np.array(pos_3d.cpu()))
